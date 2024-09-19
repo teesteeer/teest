@@ -2,111 +2,146 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+#include <stdbool.h>
 
-extern int yylex();
+void yyerror(const char *s);
+int yylex();
+
 extern int yylineno;
-extern char* yytext;
+extern char *yytext;
 
-// Symbol table
-struct Symbol {
-    char *name;
-    char *type;
-};
+char *entity_id;
+bool parsing_successful = true;
 
-#define MAX_SYMBOLS 100
-struct Symbol symbol_table[MAX_SYMBOLS];
-int symbol_count = 0;
+typedef struct Node {
+    char *key;
+    char *value;
+    struct Node *next;
+} Node;
 
-void add_symbol(char *name, char *type);
-int find_symbol(char *name);
+Node *symbol_table = NULL;
+
+Node *create_node(const char *key, const char *value);
+bool insert_symbol(Node **head, const char *key, const char *value);
+char *lookup_symbol(Node *head, const char *key);
+void free_symbol_table(Node *head);
 %}
 
-%union {
-    char *str;
-}
+%union { char *id; }
 
-%token ENTITY IS ARCHITECTURE OF SIGNAL BEGIN_TOKEN END
-%token <str> IDENTIFIER
-%type <str> entity_decl architecture_decl signal_decl assignment
+%start file
+%token entity architecture signal is begin of assignmentOP end
+%token <id> identifier INVALID_IDENTIFIER
+%token exit_command
 
-%start program
-
-%%
-
-program : entity_decl architecture_decl { printf("Parsing successful\n"); }
-        ;
-
-entity_decl : ENTITY IDENTIFIER IS END ';'
-            { 
-                add_symbol($2, "entity");
-                $$ = $2;
-            }
-            ;
-
-architecture_decl : ARCHITECTURE IDENTIFIER OF IDENTIFIER IS 
-                    signal_decl_list
-                    BEGIN_TOKEN
-                    statement_list
-                    END ';'
-                  {
-                      if (strcmp($2, $4) != 0) {
-                          yyerror("Entity name in architecture doesn't match entity declaration");
-                      }
-                      $$ = $2;
-                  }
-                  ;
-
-signal_decl_list : /* empty */
-                 | signal_decl_list signal_decl
-                 ;
-
-signal_decl : SIGNAL IDENTIFIER ':' IDENTIFIER ';'
-            {
-                add_symbol($2, $4);
-                $$ = $2;
-            }
-            ;
-
-statement_list : /* empty */
-               | statement_list assignment
-               ;
-
-assignment : IDENTIFIER "<=" IDENTIFIER ';'
-           {
-               int idx1 = find_symbol($1);
-               int idx2 = find_symbol($3);
-               if (idx1 == -1 || idx2 == -1) {
-                   yyerror("Undefined signal in assignment");
-               } else if (strcmp(symbol_table[idx1].type, symbol_table[idx2].type) != 0) {
-                   yyerror("Type mismatch in assignment");
-               }
-               $$ = $1;
-           }
-           ;
+%type <id> signal_identifier
 
 %%
 
-void add_symbol(char *name, char *type) {
-    if (symbol_count >= MAX_SYMBOLS) {
-        yyerror("Symbol table full");
-        exit(1);
+file : entity_declaration architecture_declaration ;
+
+entity_declaration : entity entity_identifier is end ';' ;
+
+architecture_declaration : architecture identifier of identifier is
+                           signal_declarations
+                           begin
+                           assignment_statements
+                           end ';' {
+    if (strcmp(entity_id, $4) != 0) {
+        parsing_successful = false;
+        printf("Line %d: \"%s\" doesn't match the declared entity name \"%s\"\n", yylineno, $4, entity_id);
     }
-    symbol_table[symbol_count].name = strdup(name);
-    symbol_table[symbol_count].type = strdup(type);
-    symbol_count++;
+};
+
+assignment_statement : identifier assignmentOP identifier ';' {
+    char *lhs_type = lookup_symbol(symbol_table, $1);
+    char *rhs_type = lookup_symbol(symbol_table, $3);
+    
+    if (!lhs_type) {
+        parsing_successful = false;
+        printf("Line %d: Unknown signal \"s_%s\"\n", yylineno, $1);
+    } else if (!rhs_type) {
+        parsing_successful = false;
+        printf("Line %d: Unknown signal \"s_%s\"\n", yylineno, $3);
+    } else if (strcmp(lhs_type, rhs_type) != 0) {
+        parsing_successful = false;
+        printf("Line %d: Signal types don't match in assignment. LHS type \"%s\", RHS type \"%s\".\n", yylineno, lhs_type, rhs_type);
+    }
+};
+
+assignment_statements : assignment_statement assignment_statements | /* empty */ ;
+
+signal_declaration : signal signal_identifier ':' signal_identifier ';' {
+    if (!insert_symbol(&symbol_table, $2, $4)) {
+        parsing_successful = false;
+        printf("Line %d: %s is already defined\n", yylineno, $2);
+    }
+};
+
+signal_declarations : signal_declaration signal_declarations | /* empty */ ;
+
+entity_identifier : identifier { entity_id = $1; } 
+                  | INVALID_IDENTIFIER {
+                      entity_id = $1;
+                      parsing_successful = false;
+                      yyerror("Invalid identifier");
+                  };
+
+signal_identifier : identifier { $$ = $1; }
+                  | INVALID_IDENTIFIER {
+                      $$ = $1;
+                      parsing_successful = false;
+                      yyerror("Invalid identifier");
+                  };
+
+%%
+
+Node *create_node(const char *key, const char *value) {
+    Node *new_node = malloc(sizeof(Node));
+    new_node->key = strdup(key);
+    new_node->value = strdup(value);
+    new_node->next = NULL;
+    return new_node;
 }
 
-int find_symbol(char *name) {
-    for (int i = 0; i < symbol_count; i++) {
-        if (strcmp(symbol_table[i].name, name) == 0) {
-            return i;
+bool insert_symbol(Node **head, const char *key, const char *value) {
+    if (lookup_symbol(*head, key)) {
+        return false;
+    }
+    Node *new_node = create_node(key, value);
+    new_node->next = *head;
+    *head = new_node;
+    return true;
+}
+
+char *lookup_symbol(Node *head, const char *key) {
+    for (Node *current = head; current != NULL; current = current->next) {
+        if (strcmp(current->key, key) == 0) {
+            return current->value;
         }
     }
-    return -1;
+    return NULL;
+}
+
+void free_symbol_table(Node *head) {
+    while (head != NULL) {
+        Node *temp = head;
+        head = head->next;
+        free(temp->key);
+        free(temp->value);
+        free(temp);
+    }
 }
 
 int main(void) {
     yyparse();
+    if (parsing_successful) {
+        printf("Parsing successful\n");
+    }
+    free_symbol_table(symbol_table);
     return 0;
+}
+
+void yyerror(const char *s) {
+    printf("Line %d: %s %s\n", yylineno, s, yytext);
 }
